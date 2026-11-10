@@ -1,0 +1,21 @@
+# Dữ liệu nhân sự (file Excel bộ biểu VTVL và báo cáo xuất ra) - KHÔNG đưa lên repo
+uploads/
+ket_qua_ra_soat/
+*.xlsx
+*.xls
+*.docx
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Hệ điều hành / editor
+.DS_Store
+Thumbs.db
+~$*
+.vscode/
+.idea/
