@@ -13,6 +13,10 @@ __pycache__/
 venv/
 .pytest_cache/
 
+# Vercel / Node
+.vercel/
+node_modules/
+
 # Hệ điều hành / editor
 .DS_Store
 Thumbs.db

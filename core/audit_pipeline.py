@@ -4,7 +4,7 @@ Pipeline tổng hợp kết quả rà soát chuyên môn VTVL (Giờ làm việc
 """
 
 from typing import Any, Dict
-from .excel_loader import load_vtvl_workbook
+from .excel_loader import load_vtvl_sheets, load_vtvl_workbook
 from .analyzer_hours import analyze_hours_anomalies
 from .analyzer_headcount import analyze_headcount_proposals
 from .analyzer_department import analyze_department_balance
@@ -13,7 +13,15 @@ from .bien_che_giao import lookup_bien_che_giao
 
 
 def run_full_audit(file_path: str) -> Dict[str, Any]:
-    raw_data = load_vtvl_workbook(file_path)
+    return audit_raw_data(load_vtvl_workbook(file_path))
+
+
+def run_full_audit_sheets(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Rà soát từ dữ liệu biểu đã trích trên trình duyệt (không cần file .xlsx trên máy chủ)."""
+    return audit_raw_data(load_vtvl_sheets(payload))
+
+
+def audit_raw_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     hours_res = analyze_hours_anomalies(raw_data)
     headcount_res = analyze_headcount_proposals(raw_data)
     dept_res = analyze_department_balance(raw_data)

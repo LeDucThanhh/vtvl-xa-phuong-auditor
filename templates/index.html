@@ -6,6 +6,7 @@
   <title>Phần mềm Rà soát Chuyên môn Giờ làm việc & Bố trí Nhân sự VTVL</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
     body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background-color: #f8fafc; color: #0f172a; }
     .main-tab-btn.active { border-bottom: 3px solid #1d4ed8; color: #1d4ed8; font-weight: 700; background-color: #eff6ff; }
@@ -31,10 +32,10 @@
 
       <div class="flex flex-wrap items-center gap-2">
         <input id="filePathInput" type="text"
-          class="px-3 py-1.5 text-xs rounded bg-slate-800 border border-slate-600 text-slate-100 w-72 md:w-80 focus:outline-none focus:border-blue-400"
+          class="path-mode px-3 py-1.5 text-xs rounded bg-slate-800 border border-slate-600 text-slate-100 w-72 md:w-80 focus:outline-none focus:border-blue-400"
           placeholder="Đường dẫn file Excel bộ biểu VTVL..." />
         <button onclick="analyzeByPath()"
-          class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-xs font-semibold rounded shadow transition">
+          class="path-mode px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-xs font-semibold rounded shadow transition">
           Phân tích đường dẫn
         </button>
         <label class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-xs font-semibold rounded shadow cursor-pointer transition">
@@ -357,26 +358,111 @@
       return Number(val).toLocaleString('vi-VN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
     }
 
-    // Không tự phân tích file nào khi mở trang: người dùng nhập đường dẫn hoặc chọn file .xlsx.
-    function loadInitialAudit() {
-      document.getElementById('currentFileLabel').textContent = 'Chưa chọn file - nhập đường dẫn hoặc bấm "Chọn file khác (.xlsx)"';
+    // ===== Nguồn dữ liệu =====
+    // Chọn file: trình duyệt đọc Excel bằng SheetJS, chỉ trích các biểu cần (giống core/excel_loader.py: SHEET_SPECS),
+    // nén gzip rồi gửi lên máy chủ. File gốc không rời máy; máy chủ không lưu gì.
+    // Nhập đường dẫn: chỉ có khi chạy trên máy cá nhân (máy chủ báo path_mode).
+    const SHEET_SPECS = {
+      '6. C1_VTVL': 12, '2. A2_CongViec': 9, '3. B1_KhoiLuong': 19,
+      '8. C3_NhuCau': 15, '9. D1_NhanLuc': 12, '10. D2_PhuongAn': 14,
+    };
+    // Cột khóa để nhận biết dòng trống (B1, D1: cột A hoặc B; các biểu khác: cột A) - khớp logic dừng sớm của máy chủ
+    const KEY_COLS = { '3. B1_KhoiLuong': [0, 1], '9. D1_NhanLuc': [0, 1] };
+    const FIRST_ROW = 3, MAX_EMPTY_STREAK = 50;
+    let SERVER_CONFIG = { path_mode: false, max_payload_bytes: null };
+    let LAST_SOURCE = null;  // {type:'path', path} | {type:'sheets', blob, name}
+
+    function setStatus(text) { document.getElementById('currentFileLabel').textContent = text; }
+
+    async function readJsonOrText(res) {
+      const text = await res.text();
+      try { return JSON.parse(text); } catch (_) { return { detail: text.slice(0, 300) || res.statusText }; }
+    }
+
+    // Không tự phân tích file nào khi mở trang.
+    async function loadInitialAudit() {
+      try { SERVER_CONFIG = await (await fetch('/api/config')).json(); } catch (_) { }
+      document.querySelectorAll('.path-mode').forEach(el => el.classList.toggle('hidden', !SERVER_CONFIG.path_mode));
+      setStatus(SERVER_CONFIG.path_mode
+        ? 'Chưa chọn file - nhập đường dẫn hoặc bấm "Chọn file khác (.xlsx)"'
+        : 'Chưa chọn file - bấm "Chọn file khác (.xlsx)". File được đọc ngay trên trình duyệt, không tải file gốc lên máy chủ.');
+    }
+
+    function pad2(n) { return String(n).padStart(2, '0'); }
+
+    // Giá trị ô giống openpyxl (data_only): số, chuỗi, ngày dạng 'YYYY-MM-DD HH:MM:SS', lỗi dạng '#N/A'
+    function cellValue(c) {
+      if (!c || c.t === 'z' || c.v === undefined || c.v === null) return null;
+      if (c.t === 'e') return c.w || null;
+      if (typeof c.v === 'string') return c.v.replace(/\r\n/g, '\n');  // openpyxl trả xuống dòng dạng \n
+      if (c.t === 'n' && c.z && XLSX.SSF.is_date(c.z)) {
+        const d = XLSX.SSF.parse_date_code(c.v);
+        if (d) {
+          const t = `${pad2(d.H)}:${pad2(d.M)}:${pad2(Math.floor(d.S))}`;
+          return c.v < 1 ? t : `${d.y}-${pad2(d.m)}-${pad2(d.d)} ${t}`;
+        }
+      }
+      return c.v;
+    }
+
+    function getCell(ws, r, c) {
+      if (ws['!data']) return (ws['!data'][r] || [])[c];
+      if (Array.isArray(ws[r])) return ws[r][c];
+      return ws[XLSX.utils.encode_cell({ r, c })];
+    }
+
+    function isBlank(v) { return v === null || v === undefined || String(v).trim() === ''; }
+
+    function extractSheets(wb, fileName) {
+      const sheets = {};
+      for (const [name, maxCol] of Object.entries(SHEET_SPECS)) {
+        const ws = wb.Sheets[name];
+        if (!ws || !ws['!ref']) continue;
+        const range = XLSX.utils.decode_range(ws['!ref']);
+        const keys = KEY_COLS[name] || [0];
+        const rows = [];
+        let streak = 0;
+        for (let r = FIRST_ROW - 1; r <= range.e.r; r++) {
+          const row = [];
+          for (let c = 0; c < maxCol; c++) row.push(cellValue(getCell(ws, r, c)));
+          while (row.length && row[row.length - 1] === null) row.pop();
+          rows.push(row);
+          if (keys.every(k => isBlank(row[k]))) {
+            if (++streak > MAX_EMPTY_STREAK) break;
+          } else {
+            streak = 0;
+          }
+        }
+        while (rows.length && rows[rows.length - 1].length === 0) rows.pop();
+        sheets[name] = rows;
+      }
+      return { file_name: fileName, sheet_names: wb.SheetNames, sheets };
+    }
+
+    async function gzipJson(obj) {
+      const text = JSON.stringify(obj);
+      if (typeof CompressionStream === 'undefined') return new Blob([text], { type: 'application/json' });
+      const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
+      return await new Response(stream).blob();
     }
 
     async function analyzeByPath() {
       const pathVal = document.getElementById('filePathInput').value.trim();
       if (!pathVal) return;
-      document.getElementById('currentFileLabel').textContent = 'Đang phân tích: ' + pathVal + ' ...';
+      setStatus('Đang phân tích: ' + pathVal + ' ...');
       try {
         const res = await fetch('/api/audit-path', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ file_path: pathVal })
         });
-        const data = await res.json();
+        const data = await readJsonOrText(res);
         if (!res.ok) throw new Error(data.detail || 'Lỗi phân tích file');
         AUDIT_DATA = data;
+        LAST_SOURCE = { type: 'path', path: pathVal };
         renderDashboard();
       } catch (err) {
+        setStatus('Không phân tích được: ' + pathVal);
         alert('Không thể đọc file: ' + err.message);
       }
     }
@@ -384,27 +470,59 @@
     async function uploadAndAnalyze(inputEl) {
       const file = inputEl.files[0];
       if (!file) return;
-      document.getElementById('currentFileLabel').textContent = 'Đang tải lên và phân tích: ' + file.name + ' ...';
       try {
+        if (typeof XLSX === 'undefined') throw new Error('Chưa tải được thư viện đọc Excel (SheetJS). Kiểm tra mạng rồi tải lại trang.');
+        setStatus('Đang đọc file trên trình duyệt: ' + file.name + ' ...');
+        await new Promise(r => setTimeout(r, 30));  // cho giao diện cập nhật trạng thái
         const buf = await file.arrayBuffer();
-        const res = await fetch('/api/audit-upload?filename=' + encodeURIComponent(file.name), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: buf
+        const wb = XLSX.read(buf, {
+          type: 'array', sheets: Object.keys(SHEET_SPECS), dense: true,
+          cellNF: true, cellStyles: false, cellHTML: false, cellFormula: false,
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Lỗi tải file');
+        const blob = await gzipJson(extractSheets(wb, file.name));
+        const limit = SERVER_CONFIG.max_payload_bytes;
+        if (limit && blob.size > limit) {
+          throw new Error(`Dữ liệu sau khi trích vẫn lớn (${(blob.size / 1048576).toFixed(1)} MB), vượt giới hạn ${(limit / 1048576).toFixed(1)} MB của máy chủ.`);
+        }
+        setStatus(`Đang phân tích: ${file.name} (gửi ${(blob.size / 1024).toFixed(0)} KB thay vì ${(file.size / 1048576).toFixed(1)} MB) ...`);
+        const res = await fetch('/api/audit-sheets', {
+          method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: blob,
+        });
+        const data = await readJsonOrText(res);
+        if (!res.ok) throw new Error(data.detail || 'Lỗi phân tích file');
         AUDIT_DATA = data;
-        document.getElementById('filePathInput').value = data.file_path;
+        LAST_SOURCE = { type: 'sheets', blob, name: file.name };
         renderDashboard();
       } catch (err) {
-        alert('Lỗi tải file: ' + err.message);
+        setStatus('Không phân tích được file: ' + file.name);
+        alert('Lỗi đọc/phân tích file: ' + err.message);
+      } finally {
+        inputEl.value = '';  // cho phép chọn lại cùng một file
       }
     }
 
-    function downloadExcelReport() {
-      const pathVal = document.getElementById('filePathInput').value.trim();
-      window.location.href = '/api/export-excel?file_path=' + encodeURIComponent(pathVal);
+    async function downloadExcelReport() {
+      if (!LAST_SOURCE) { alert('Chưa có kết quả rà soát. Hãy chọn file trước.'); return; }
+      if (LAST_SOURCE.type === 'path') {
+        window.location.href = '/api/export-excel?file_path=' + encodeURIComponent(LAST_SOURCE.path);
+        return;
+      }
+      try {
+        const res = await fetch('/api/export-excel-sheets', {
+          method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: LAST_SOURCE.blob,
+        });
+        if (!res.ok) throw new Error((await readJsonOrText(res)).detail || 'Lỗi xuất báo cáo');
+        const url = URL.createObjectURL(await res.blob());
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'Bao_cao_Ra_soat_Chuyen_mon_Gio_VTVL_' + LAST_SOURCE.name.replace(/\.[^.]+$/, '') + '.xlsx';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      } catch (err) {
+        alert('Lỗi xuất báo cáo: ' + err.message);
+      }
     }
 
     function renderDashboard() {

@@ -46,23 +46,63 @@ def _khoi_of(unit_profile: str, dept_code: str) -> str:
     return KHOI_SU_NGHIEP if unit_profile else get_khoi(dept_code)
 
 
+# Các biểu cần đọc và số cột tối đa (đọc từ dòng 3). Trình duyệt cũng dùng đúng danh sách này để trích dữ liệu.
+SHEET_SPECS: Dict[str, int] = {
+    "6. C1_VTVL": 12,
+    "2. A2_CongViec": 9,
+    "3. B1_KhoiLuong": 19,
+    "8. C3_NhuCau": 15,
+    "9. D1_NhanLuc": 12,
+    "10. D2_PhuongAn": 14,
+}
+FIRST_ROW = 3
+
+
 def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
     """
-    Đọc toàn bộ dữ liệu cốt lõi phục vụ rà soát chuyên môn giờ làm việc và biên chế.
+    Đọc toàn bộ dữ liệu cốt lõi phục vụ rà soát chuyên môn giờ làm việc và biên chế từ file .xlsx.
     """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Không tìm thấy file: {file_path}")
 
     wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
-    sheet_names = wb.sheetnames
+    try:
+        def rows_of(name: str, max_col: int):
+            return wb[name].iter_rows(min_row=FIRST_ROW, max_col=max_col, values_only=True)
+
+        return _build(rows_of, wb.sheetnames, path.name, str(path))
+    finally:
+        wb.close()
+
+
+def load_vtvl_sheets(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Đọc từ dữ liệu đã trích sẵn trên trình duyệt (SheetJS): giống hệt load_vtvl_workbook nhưng không cần file .xlsx.
+    payload = {"file_name": str, "sheet_names": [...], "sheets": {tên biểu: [[giá trị ô...] từ dòng 3, ...]}}
+    """
+    sheets = payload.get("sheets") or {}
+    file_name = Path(str(payload.get("file_name") or "uploaded_vtvl.xlsx")).name
+    sheet_names = [str(x) for x in (payload.get("sheet_names") or list(sheets.keys()))]
+    for name in sheets:
+        if name not in sheet_names:
+            sheet_names.append(name)
+
+    def rows_of(name: str, max_col: int):
+        for r in sheets.get(name) or []:
+            yield tuple((r or [])[:max_col])
+
+    return _build(rows_of, sheet_names, file_name, file_name)
+
+
+def _build(rows_of, sheet_names: List[str], file_name: str, file_path: str) -> Dict[str, Any]:
 
     # 1. Đọc C1_VTVL
     c1_map: Dict[str, Dict[str, Any]] = {}
     if "6. C1_VTVL" in sheet_names:
-        ws = wb["6. C1_VTVL"]
+        _sheet = "6. C1_VTVL"
         empty_streak = 0
-        for row_idx, r in enumerate(ws.iter_rows(min_row=3, max_col=12, values_only=True), 3):
+        for row_idx, r in enumerate(rows_of(_sheet, 12), 3):
             ma_vtvl = _to_str(r[0] if len(r) > 0 else None)
             if not ma_vtvl:
                 empty_streak += 1
@@ -100,9 +140,9 @@ def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
     # 2. Đọc A2_CongViec
     a2_map: Dict[str, Dict[str, Any]] = {}
     if "2. A2_CongViec" in sheet_names:
-        ws = wb["2. A2_CongViec"]
+        _sheet = "2. A2_CongViec"
         empty_streak = 0
-        for row_idx, r in enumerate(ws.iter_rows(min_row=3, max_col=9, values_only=True), 3):
+        for row_idx, r in enumerate(rows_of(_sheet, 9), 3):
             ma_cv = _to_str(r[0] if len(r) > 0 else None)
             if not ma_cv:
                 empty_streak += 1
@@ -125,9 +165,9 @@ def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
     b1_rows: List[Dict[str, Any]] = []
     b1_by_vtvl: Dict[str, List[Dict[str, Any]]] = {}
     if "3. B1_KhoiLuong" in sheet_names:
-        ws = wb["3. B1_KhoiLuong"]
+        _sheet = "3. B1_KhoiLuong"
         empty_streak = 0
-        for row_idx, r in enumerate(ws.iter_rows(min_row=3, max_col=19, values_only=True), 3):
+        for row_idx, r in enumerate(rows_of(_sheet, 19), 3):
             ma_cv = _to_str(r[0] if len(r) > 0 else None)
             ma_vtvl = _to_str(r[1] if len(r) > 1 else None)
             if not ma_cv and not ma_vtvl:
@@ -188,9 +228,9 @@ def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
     # 4. Đọc C3_NhuCau
     c3_map: Dict[str, Dict[str, Any]] = {}
     if "8. C3_NhuCau" in sheet_names:
-        ws = wb["8. C3_NhuCau"]
+        _sheet = "8. C3_NhuCau"
         empty_streak = 0
-        for row_idx, r in enumerate(ws.iter_rows(min_row=3, max_col=15, values_only=True), 3):
+        for row_idx, r in enumerate(rows_of(_sheet, 15), 3):
             ma_vtvl = _to_str(r[0] if len(r) > 0 else None)
             if not ma_vtvl:
                 empty_streak += 1
@@ -242,9 +282,9 @@ def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
     d1_rows: List[Dict[str, Any]] = []
     d1_by_vtvl: Dict[str, List[Dict[str, Any]]] = {}
     if "9. D1_NhanLuc" in sheet_names:
-        ws = wb["9. D1_NhanLuc"]
+        _sheet = "9. D1_NhanLuc"
         empty_streak = 0
-        for row_idx, r in enumerate(ws.iter_rows(min_row=3, max_col=12, values_only=True), 3):
+        for row_idx, r in enumerate(rows_of(_sheet, 12), 3):
             ma_nl = _to_str(r[0] if len(r) > 0 else None)
             ma_vtvl = _to_str(r[1] if len(r) > 1 else None)
             if not ma_nl and not ma_vtvl:
@@ -271,9 +311,9 @@ def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
     # 6. Đọc D2_PhuongAn
     d2_by_vtvl: Dict[str, List[Dict[str, Any]]] = {}
     if "10. D2_PhuongAn" in sheet_names:
-        ws = wb["10. D2_PhuongAn"]
+        _sheet = "10. D2_PhuongAn"
         empty_streak = 0
-        for row_idx, r in enumerate(ws.iter_rows(min_row=3, max_col=14, values_only=True), 3):
+        for row_idx, r in enumerate(rows_of(_sheet, 14), 3):
             ma_vtvl = _to_str(r[0] if len(r) > 0 else None)
             if not ma_vtvl:
                 empty_streak += 1
@@ -303,14 +343,12 @@ def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
             }
             d2_by_vtvl.setdefault(ma_vtvl, []).append(item)
 
-    wb.close()
-
     # Loại đơn vị của cả file (Trạm Y tế, TT Dịch vụ tổng hợp, trường học...) - xác định từ 'Nơi tính BC' (D1) hoặc tên file
     unit_texts = [r["noi_tinh_bc"] for r in d1_rows[:50] if r.get("noi_tinh_bc")]
-    unit_profile = detect_unit_profile(path.name, unit_texts)
-    if not unit_profile and lookup_cap_tinh(path.name, unit_texts) is not None:
+    unit_profile = detect_unit_profile(file_name, unit_texts)
+    if not unit_profile and lookup_cap_tinh(file_name, unit_texts) is not None:
         unit_profile = "SO_NGANH"  # Sở/ngành cấp tỉnh
-    chinh_quyen = (not unit_profile) and is_chinh_quyen_context(path.name, unit_texts)
+    chinh_quyen = (not unit_profile) and is_chinh_quyen_context(file_name, unit_texts)
 
     all_vtvl_codes = list(c1_map.keys())
     for k in c3_map.keys():
@@ -374,8 +412,8 @@ def load_vtvl_workbook(file_path: str) -> Dict[str, Any]:
         })
 
     return {
-        "file_name": path.name,
-        "file_path": str(path),
+        "file_name": file_name,
+        "file_path": file_path,
         "sheet_names": sheet_names,
         "standard_hours": STANDARD_HOURS,
         "chinh_quyen_context": chinh_quyen,
